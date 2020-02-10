@@ -12,6 +12,11 @@ This demo uses docker-compose to start two SQL Server containers; one that acts 
 
 ```
 docker-compose up
+1. If you are running this compose on Windows, make sure that sh and sql scritps in db1 and db2 folders have unix end of line.
+```
+dos2unix *.sh *.sql
+```
+
 ```
 note: this will take approx. 2 min.
 
