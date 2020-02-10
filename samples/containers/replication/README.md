@@ -1,3 +1,6 @@
+## Info
+Copy from https://github.com/microsoft/sql-server-samples
+
 ## SQL Server Replication with Containers
 
 This demo uses docker-compose to start two SQL Server containers; one that acts as the publisher and distributor, and the other as the subscriber in a push snapshot configuration. 
