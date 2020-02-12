@@ -3,13 +3,25 @@ set nocount on;
 use master;
 go
 
+-- removed database if exists
 if db_id('publisher_db') is not null 
 begin
+	exec sp_removedbreplication @dbname = 'publisher_db'
 	alter database publisher_db set single_user with rollback immediate;
 	drop database publisher_db;
 	print convert(varchar(30), getdate(), 121) + ' - droped database publisher_db'
 end
 go
+
+-- removed all jobs 
+declare @job_name varchar(1000);
+
+while exists (select 1 from msdb.dbo.sysjobs_view) 
+begin
+	select @job_name = name from msdb.dbo.sysjobs_view;
+	exec msdb.dbo.sp_delete_job @job_name = @job_name, @delete_unused_schedule=1;
+	print convert(varchar(30), getdate(), 121) + ' - deleted job ' + @job_name;
+end
 
 create database publisher_db;
 go
@@ -74,6 +86,8 @@ create table dbo.mock_stmt_log
 ,	create_date datetime default getdate()
 )
 go
+print convert(varchar(30), getdate(), 121) + ' - created table dbo.mock_stmt_log';
+go
 
 -- crate mock_stmt_caller for call mock_stmt with pseudo random operation and data quantity
 create or alter procedure dbo.mock_stmt_caller
@@ -118,6 +132,8 @@ begin
 
 end
 go
+print convert(varchar(30), getdate(), 121) + ' - created procedure dbo.mock_stmt_caller';
+go
 
 -- create procedure to exec mock_stmt_caller in loop with waitfor delay
 create or alter procedure dbo.mock_stmt_caller_loop
@@ -151,22 +167,25 @@ begin
 	return 0
 end
 go
+print convert(varchar(30), getdate(), 121) + ' - created procedure dbo.mock_stmt_caller_loop';
+go
 
--- create replication objects
+use master
+go
+-- creating replication objects
 declare @distributor sysname = @@servername;
 declare @distributor_login sysname = N'sa';
 declare @distributor_password sysname = N'MssqlPass123';
-
 -- check is distributor exists
 declare @sp_get_distributor table (is_installed int,distribution_server_name varchar(500),is_distribution_db_installed int,is_distribution_publisher int,has_remote_distribution_publisher int);
 insert @sp_get_distributor exec master.sys.sp_get_distributor
 -- drop distributor
 if exists (select 1 from @sp_get_distributor where is_installed = 1)
-exec master.sys.sp_dropdistributor @no_checks = 1, @ignore_distributor=1;
+exec sp_dropdistributor @no_checks = 1, @ignore_distributor=1;
 -- create distributor
-exec master.sys.sp_adddistributor @distributor = @distributor;
+exec sp_adddistributor @distributor = @distributor;
 -- create distributor database
-exec master.sys.sp_adddistributiondb 
+exec sp_adddistributiondb 
 	 @database = N'distributor_db'
 	,@log_file_size = 2
 	,@deletebatchsize_xact = 5000
@@ -175,7 +194,67 @@ exec master.sys.sp_adddistributiondb
 	,@login = @distributor_login
 	,@password = @distributor_password;
 go
+print convert(varchar(30), getdate(), 121) + ' - created distributor database distributor_db';
+go
 
+use publisher_db
+go
+-- adding the distrubution publisher
+declare @publisher sysname = @@servername;
+declare @distributor_login sysname = N'sa';
+declare @distributor_password sysname = N'MssqlPass123';
+exec sp_adddistpublisher @publisher         = @publisher
+,                        @distribution_db   = N'distributor_db'
+,                        @security_mode     = 0
+,                        @login             = @distributor_login
+,                        @password          = @distributor_password
+,                        @working_directory = N'/var/opt/mssql/ReplData'
+,                        @trusted           = N'false'
+,                        @thirdparty_flag   = 0
+,                        @publisher_type    = N'MSSQLSERVER'
+go
+print convert(varchar(30), getdate(), 121) + ' - added distributor to publisher';
+go
+
+use publisher_db
+go
+-- adding the snapshot replication
+declare @distributor sysname = @@servername;
+declare @publisher_login sysname = N'sa';
+declare @publisher_password sysname = N'MssqlPass123';
+
+exec sp_replicationdboption @dbname = N'publisher_db', @optname = N'publish', @value = N'true'
+
+exec sp_addpublication
+	@publication = N'snp_repl_publisher_db', 
+	@description = N'Snapshot publication of database ''publisher_db'' from Publisher ''<PUBLISHER HOSTNAME>''.',
+	@retention = 0, 
+	@allow_push = N'true', 
+	@repl_freq = N'snapshot', 
+	@status = N'active', 
+	@independent_agent = N'true'
+
+exec sp_addpublication_snapshot 
+	@publication = N'snp_repl_publisher_db', 
+	@frequency_type = 128, 
+	@frequency_interval = 8, 
+	@frequency_relative_interval = 1, 
+	@frequency_recurrence_factor = 0, 
+	@frequency_subday = 4, 
+	@frequency_subday_interval = 2, 
+	@active_start_time_of_day = 0,
+	@active_end_time_of_day = 235959, 
+	@active_start_date = 0, 
+	@active_end_date = 0, 
+	@publisher_security_mode = 0, 
+	@publisher_login = @publisher_login, 
+	@publisher_password = @publisher_password
+go
+print convert(varchar(30), getdate(), 121) + ' - added snapshot replication';
+go
+
+use publisher_db;
+go
 -- create objects 
 declare @snp_repl_table_qty int = 3;
 declare @snp_table_name_prefix varchar(100) = 'tab_';
@@ -185,10 +264,15 @@ declare @stmt nvarchar(max);
 declare @job_name sysname;
 declare @job_id binary(16)
 declare @step_name sysname;
+declare @publication varchar(100) = 'snp_repl_publisher_db';
+declare @schema_option binary(8) = 0x000000000003409;
+declare @table_schema_name sysname;
+declare @table_name sysname;
 
 set @cnt = 0
 while ( @cnt < @snp_repl_table_qty )
 begin
+	
 	set @snp_table_name = 'snp.' + @snp_table_name_prefix + cast(@cnt as varchar(10));
 	-- create table
 	set @stmt = 
@@ -198,6 +282,10 @@ begin
 		exec (@stmt);
 		print convert(varchar(30), getdate(), 121) + ' - created table ' + @snp_table_name;
 	end
+		
+	set @table_schema_name = object_schema_name(object_id(@snp_table_name));
+	set @table_name = object_name(object_id(@snp_table_name))
+	
 	-- insert data to table
 	set @stmt =
 	'
@@ -214,7 +302,6 @@ begin
 	print convert(varchar(30), getdate(), 121) + ' - added data to table ' + @snp_table_name;
 	
 	exec (@stmt);	
-	set @cnt += 1;
 	
 	-- create jobs to mock stmt generator
 	set @job_id = null;
@@ -254,6 +341,77 @@ begin
 	exec msdb.dbo.sp_add_jobserver @job_name = @job_name;
 	-- start job 
 	exec msdb.dbo.sp_start_job @job_name = @job_name;
-
-	print convert(varchar(30), getdate(), 121) + ' - created job ' + @job_name;	 
+	print convert(varchar(30), getdate(), 121) + ' - created job ' + @job_name;
+	
+	-- adding aricles to replication with generated tables
+	exec publisher_db.sys.sp_addarticle 
+		@publication = @publication, 
+		@article = @snp_table_name, 
+		@source_owner = @table_schema_name, 
+		@source_object = @table_name, 
+		@type = N'logbased', 
+		@description = null, 
+		@creation_script = null, 
+		@pre_creation_cmd = N'drop', 
+		@schema_option = @schema_option,
+		@identityrangemanagementoption = N'manual', 
+		@destination_table = @table_name, 
+		@destination_owner = @table_schema_name, 
+		@vertical_partition = N'false';
+	print convert(varchar(30), getdate(), 121) + ' - added artice for table ' + @snp_table_name;
+	
+	set @cnt += 1;		 
 end;
+go
+
+use publisher_db;
+go
+
+declare @subscriber sysname = N'db2';
+declare @subscriber_db sysname = N'subscriber_db';
+declare @subscriberLogin sysname = N'sa';
+declare @subscriberPassword sysname =  N'MssqlPass123'
+declare @publication varchar(100) = 'snp_repl_publisher_db';
+
+exec sp_addsubscription 
+	@publication = @publication, 
+	@subscriber = @subscriber,
+	@destination_db = @subscriber_db, 
+	@subscription_type = N'Push', 
+	@sync_type = N'automatic', 
+	@article = N'all', 
+	@update_mode = N'read only', 
+	@subscriber_type = 0
+
+exec sp_addpushsubscription_agent 
+	@publication = @publication, 
+	@subscriber = @subscriber,
+	@subscriber_db = @subscriber_db, 
+	@subscriber_security_mode = 0, 
+	@subscriber_login =  @subscriberLogin,
+	@subscriber_password =  @subscriberPassword,
+	@frequency_type = 128, 
+	@frequency_interval = 8, 
+	@frequency_relative_interval = 0, 
+	@frequency_recurrence_factor = 0, 
+	@frequency_subday = 4, 
+	@frequency_subday_interval = 2, 
+	@active_start_time_of_day = 0, 
+	@active_end_time_of_day = 0, 
+	@active_start_date = 0, 
+	@active_end_date = 19950101
+go
+print convert(varchar(30), getdate(), 121) + ' - created substriction';
+go
+
+declare @publication varchar(100) = 'snp_repl_publisher_db';
+exec sp_startpublication_snapshot 
+	@publication = @publication, 
+	@publisher = NULL
+go 
+print convert(varchar(30), getdate(), 121) + ' - creating snapshot';
+/*
+select s.*
+from msdb.dbo.sysjobs s inner join msdb.dbo.syscategories c on s.category_id = c.category_id
+where c.name in ('REPL-Distribution')
+*/
