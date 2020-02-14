@@ -8,8 +8,8 @@ services:
             MSSQL_AGENT_ENABLED: "true"
         ports:
             - "2500:1433"
-        container_name: db1
-        hostname: db1
+        container_name: repl_db1
+        hostname: repl_db1
     db2:
         build: ./db2
         environment:
@@ -18,6 +18,6 @@ services:
             MSSQL_AGENT_ENABLED: "true"
         ports:
             - "2600:1433"
-        container_name: db2
-        hostname: db2
+        container_name: repl_db2
+        hostname: repl_db2
 
